@@ -51,7 +51,7 @@ public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> i
         if (CollectionUtils.isEmpty(shopTypeList)){
 //        不存在，创建空集合，防止缓存穿透，返回报错
             stringRedisTemplate.opsForValue()
-                    .set(RedisConstants.CACHE_SHOP_TYPE_KEY, Collections.emptyList().toString(), RedisConstants.CACHE_SHOP_TYPE_TTL, TimeUnit.MINUTES);
+                    .set(RedisConstants.CACHE_SHOP_TYPE_KEY, Collections.emptyList().toString(), RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES);
             return Result.fail("店铺不存在");
         }
 //        存在，写入redis，返回
