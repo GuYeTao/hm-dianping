@@ -5,20 +5,25 @@ import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
+import com.hmdp.entity.Follow;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.service.IFollowService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
@@ -42,6 +47,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private IFollowService followService;
 
 
     @Override
@@ -131,13 +139,71 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         List<Long> ids = top5.stream().map(Long::valueOf).collect(Collectors.toList());
 //        根据id找用户
         String idStr = StrUtil.join(",", ids);
-        List<UserDTO> userDTOS = userService.query()
+        List<UserDTO> userDTOs = userService.query()
                 .in("id", ids)
                 .last("order by field(id,"+idStr+")").list()
                 .stream()
                 .map(user -> BeanUtil.copyProperties(user, UserDTO.class))
                 .collect(Collectors.toList());
 
-        return Result.ok(userDTOS);
+        return Result.ok(userDTOs);
+    }
+
+    @Override
+    public Result saveBlog(Blog blog) {
+        UserDTO userDTO = UserHolder.getUser();
+        blog.setUserId(userDTO.getId());
+        boolean isSuccess = save(blog);
+        if (!isSuccess) {
+            return Result.fail("新增笔记失败");
+        }
+//        找到作者的所有粉丝 select * from tb_follow where follow_user_id =
+        List<Follow> follows = followService.query().eq("follow_user_id", userDTO.getId()).list();
+        for (Follow follow : follows) {
+            Long userId = follow.getUserId();
+            String key = RedisConstants.FEED_KEY+userId;
+            stringRedisTemplate.opsForZSet().add(key, blog.getId().toString(), System.currentTimeMillis());
+        }
+
+        return Result.ok(blog.getId());
+    }
+
+    @Override
+    public Result queryBlogOfFollow(Long max, Integer offset) {
+//        获取当前用户
+        Long userId = UserHolder.getUser().getId();
+//        查询收件箱，得到blogid，分数（时间戳）
+        String key = RedisConstants.FEED_KEY+userId;
+        Set<ZSetOperations.TypedTuple<String>> typedTuples = stringRedisTemplate.opsForZSet()
+                .reverseRangeByScoreWithScores(key, 0, max, offset, 3);
+        if (typedTuples==null||typedTuples.isEmpty()){
+            return Result.ok();
+        }
+//        根据id找blog，返回
+        List<Long> ids = new ArrayList<>(typedTuples.size());
+        long minTime = 0;
+        int os = 1;
+        for (ZSetOperations.TypedTuple<String> tuple : typedTuples) {
+            ids.add(Long.valueOf(tuple.getValue()));
+            long time = tuple.getScore().longValue();
+            if (time == minTime) {
+                os++;
+            } else {
+                minTime = time;
+                os = 1;
+            }
+        }
+        String idStr = StrUtil.join(",", ids);
+        List<Blog> blogs = query().in("id", ids).last("order by field(id,"+idStr+")").list();
+        for (Blog blog : blogs) {
+            queryBlogUser(blog);
+            isBlogLiked(blog);
+        }
+
+        ScrollResult r = new ScrollResult();
+        r.setList(blogs);
+        r.setOffset(os);
+        r.setMinTime(minTime);
+        return Result.ok(r);
     }
 }
